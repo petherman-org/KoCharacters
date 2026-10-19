@@ -14,6 +14,14 @@ Automatically extract, track, and enrich character profiles from your books usin
 4. Copy the key (it starts with `AIza…`)
 5. No credit card required — free tier gives 500 requests/day and 1M tokens/day
 
+### Brave Search (portrait lookup — optional)
+
+Instead of generating a portrait, you can look one up with **Find image**, which uses the Brave Search image API.
+
+1. Go to **brave.com/search/api** and sign up
+2. Create an API key for the Search API
+3. Paste it in **Settings... → AI Settings... → Brave Search API key**
+
 ### Gemini image models (portrait generation — paid)
 
 Portrait generation uses Gemini image models (Nano Banana, e.g. `gemini-3.1-flash-image`) via the Gemini API. Google Imagen was shut down in the Gemini API, so it is no longer used. The same key format (`AIza…`) is used; image generation may require a Google Cloud project with billing enabled and is charged per image generated.
@@ -53,8 +61,9 @@ Tapping a character in the list opens their profile with two rows of actions:
 
 | Row | Buttons |
 |---|---|
-| **Row 1** | Generate Portrait — Merge into... — Delete Character |
-| **Row 2** | Re-analyze — Clean up — Edit |
+| **Row 1** | Re-analyze — Clean up — Edit |
+| **Row 2** | Gen. portrait — Find image — Merge into... |
+| **Row 3** | Delete — Close |
 
 The same actions are available when using **Find character** by selecting text in the book.
 
@@ -123,6 +132,16 @@ Portraits are generated via **Gemini image models** and saved as PNG files insid
 - **Portrait filename** is stored on the character record so the image link survives name renames
 - **Model selection** — choose between Gemini image models (lite, flash, pro) in AI Settings
 - Portraits are embedded in the HTML export with a **lightbox** (click to enlarge)
+
+### Portrait lookup (image search)
+
+**Find image** on a character's profile searches the web for an existing picture instead of generating one:
+
+1. Edit the search terms (defaults to the character name plus the book title)
+2. Pick a result from the list (title and source site)
+3. Preview the image, then choose **Use as portrait** or go back to the results
+
+Results come from the **Brave Search image API** with safe search on, and the saved image replaces any existing portrait for that character.
 
 ### Spoiler protection
 
@@ -202,6 +221,7 @@ The book ID is derived from the sanitized book title and a byte-sum hash of the 
 |---|---|
 | **Gemini Character Extraction key** | API key used for character extraction, cleanup, and relationship mapping |
 | **Gemini Image Generation key** | API key used for portrait generation via Gemini image models |
+| **Brave Search API key** | API key used by **Find image** to look up portraits via image search |
 | **Image model** | Choose between `gemini-3.1-flash-image` (default), `gemini-3.1-flash-lite-image`, `gemini-3-pro-image`, or `gemini-2.5-flash-image` |
 | **Edit extraction prompt** | Customise the prompt sent to Gemini for character extraction |
 | **Edit cleanup prompt** | Customise the deduplication prompt |
@@ -235,6 +255,7 @@ The book ID is derived from the sanitized book title and a byte-sum hash of the 
 - KOReader with `ssl.https` / `ltn12` support (standard on Kindle builds)
 - A free Google Gemini API key from aistudio.google.com (for character extraction)
 - A Gemini API key with image generation access (optional, for portrait generation)
+- A Brave Search API key (optional, for portrait lookup via image search)
 - `unzip` available on the device (standard on Kindle)
 - `base64` and `curl` available on the device (standard on Kindle, required for portrait generation and server upload)
 - `zip` available on the device (required for ZIP export — standard on Kindle via BusyBox)
