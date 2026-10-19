@@ -1,6 +1,6 @@
 # KoCharacters — KOReader Plugin
 
-Automatically extract, track, and enrich character profiles from your books using the **Google Gemini AI API** (free tier). Generate AI portraits using **Google Imagen**. Runs on KOReader on Kindle and other supported devices.
+Automatically extract, track, and enrich character profiles from your books using the **Google Gemini AI API** (free tier). Generate AI portraits using **Gemini image models**. Runs on KOReader on Kindle and other supported devices.
 
 ---
 
@@ -14,9 +14,9 @@ Automatically extract, track, and enrich character profiles from your books usin
 4. Copy the key (it starts with `AIza…`)
 5. No credit card required — free tier gives 500 requests/day and 1M tokens/day
 
-### Imagen (portrait generation — paid)
+### Gemini image models (portrait generation — paid)
 
-Portrait generation uses the Google Imagen API, which requires a Google Cloud project with billing enabled. The same key format (`AIza…`) is used but must be created in Google AI Studio with Imagen access enabled. Imagen charges per image generated.
+Portrait generation uses Gemini image models (Nano Banana, e.g. `gemini-3.1-flash-image`) via the Gemini API. Google Imagen was shut down in the Gemini API, so it is no longer used. The same key format (`AIza…`) is used; image generation may require a Google Cloud project with billing enabled and is charged per image generated.
 
 ---
 
@@ -43,7 +43,7 @@ All actions live under the reader menu → **KoCharacters**:
 | **Re-analyze character** | Pick a character and re-run Gemini against the current page to enrich their profile |
 | **View relationship map** | Gemini reads all saved profiles and produces a text relationship map |
 | **Cleanup all characters** | Batch-deduplicates redundant text in all character profiles via Gemini, then detects and offers to merge characters that are almost certainly the same person |
-| **Generate portraits** | Select one or more characters to generate AI portraits via Imagen |
+| **Generate portraits** | Select one or more characters to generate AI portraits via a Gemini image model |
 | **Export...** | Export character list (HTML), Export as ZIP (HTML + portraits), or Upload to server |
 | **Settings...** | Configure keys, auto-extract, indicators, spoiler protection, and prompts |
 
@@ -117,11 +117,11 @@ After the text cleanup pass, the plugin runs a second Gemini call across all cha
 
 ### Portrait generation
 
-Portraits are generated via the **Google Imagen API** and saved as PNG files inside the book's data folder. The portrait prompt is built automatically from the character's appearance, personality, occupation, and the book context, and is styled to match the era and setting of the book.
+Portraits are generated via **Gemini image models** and saved as PNG files inside the book's data folder. The portrait prompt is built automatically from the character's appearance, personality, occupation, and the book context, and is styled to match the era and setting of the book.
 
 - **Batch generation** — select any number of characters from a list; characters that already have a portrait are marked with `[img]`
 - **Portrait filename** is stored on the character record so the image link survives name renames
-- **Model selection** — choose between fast, standard, or ultra Imagen models in AI Settings
+- **Model selection** — choose between Gemini image models (lite, flash, pro) in AI Settings
 - Portraits are embedded in the HTML export with a **lightbox** (click to enlarge)
 
 ### Spoiler protection
@@ -201,13 +201,13 @@ The book ID is derived from the sanitized book title and a byte-sum hash of the 
 | Setting | Description |
 |---|---|
 | **Gemini Character Extraction key** | API key used for character extraction, cleanup, and relationship mapping |
-| **Gemini Image Generation key** | API key used for portrait generation via Imagen |
-| **Imagen model** | Choose between `imagen-4.0-fast-generate-001`, `imagen-4.0-generate-001`, or `imagen-4.0-ultra-generate-001` |
+| **Gemini Image Generation key** | API key used for portrait generation via Gemini image models |
+| **Image model** | Choose between `gemini-3.1-flash-image` (default), `gemini-3.1-flash-lite-image`, `gemini-3-pro-image`, or `gemini-2.5-flash-image` |
 | **Edit extraction prompt** | Customise the prompt sent to Gemini for character extraction |
 | **Edit cleanup prompt** | Customise the deduplication prompt |
 | **Edit re-analyze prompt** | Customise the re-analysis prompt |
 | **Edit relationship map prompt** | Customise the relationship map prompt |
-| **Edit portrait prompt** | Customise the Imagen portrait generation prompt |
+| **Edit portrait prompt** | Customise the portrait generation prompt |
 | **Edit merge detection prompt** | Customise the prompt used to detect duplicate characters during cleanup |
 | **View book context** | View the auto-built genre/era/setting summary; option to clear it |
 
@@ -223,7 +223,7 @@ The book ID is derived from the sanitized book title and a byte-sum hash of the 
 | **Auto-accept enrichments** | Silently enrich existing characters when near-duplicates are detected, instead of prompting |
 | **Spoiler protection** | Hide characters first seen beyond your current page |
 | **Character detail view** | **Text** — plain scrollable viewer; **HTML (with portrait)** — richer layout with the AI-generated portrait image embedded |
-| **View API usage** | Daily log of Gemini text calls and Imagen image generations |
+| **View API usage** | Daily log of Gemini text calls and image generations |
 | **Export settings** | Configure the upload endpoint URL and optional API key for "Upload to server" |
 | **Clear character database** | Delete all saved characters for the current book |
 | **Reset prompts to default** | Restore all prompts to their built-in defaults |
@@ -234,7 +234,7 @@ The book ID is derived from the sanitized book title and a byte-sum hash of the 
 
 - KOReader with `ssl.https` / `ltn12` support (standard on Kindle builds)
 - A free Google Gemini API key from aistudio.google.com (for character extraction)
-- A Google Imagen API key (optional, for portrait generation)
+- A Gemini API key with image generation access (optional, for portrait generation)
 - `unzip` available on the device (standard on Kindle)
 - `base64` and `curl` available on the device (standard on Kindle, required for portrait generation and server upload)
 - `zip` available on the device (required for ZIP export — standard on Kindle via BusyBox)
