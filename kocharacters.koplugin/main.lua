@@ -1320,8 +1320,10 @@ function KoCharacters:getCurrentPageText(override_page)
                         logger.info("KoCharacters: spine#" .. n .. " id=" .. tostring(item_id))
 
                         if item_id then
-                            local pat1 = [[item[^>]+href="([^"]+)"[^>]+id="]] .. item_id .. [["]]
-                            local pat2 = [[item[^>]+id="]] .. item_id .. [["[^>]+href="([^"]+)"]]
+                            -- Escape Lua pattern magic chars in item_id (e.g. "-" is a pattern quantifier)
+                            local id_pat = item_id:gsub("([%(%)%.%%%+%-%*%?%[%^%$])", "%%%1")
+                            local pat1 = [[item[^>]+href="([^"]+)"[^>]+id="]] .. id_pat .. [["]]
+                            local pat2 = [[item[^>]+id="]] .. id_pat .. [["[^>]+href="([^"]+)"]]
                             local href = opf:match(pat2) or opf:match(pat1)
                             logger.info("KoCharacters: chapter href=" .. tostring(href))
 
