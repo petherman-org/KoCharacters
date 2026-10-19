@@ -948,9 +948,25 @@ function KoCharacters:getApiKey()
     return G_reader_settings:readSetting("kocharacters_extraction_api_key") or ""
 end
 
--- Key for Imagen image generation
+-- Key for Gemini image generation (setting name kept from the Imagen era)
 function KoCharacters:getImagenApiKey()
     return G_reader_settings:readSetting("kocharacters_imagen_api_key") or ""
+end
+
+-- Gemini image models for portrait generation (Imagen was shut down in the Gemini API)
+local IMAGE_MODELS = {
+    "gemini-3.1-flash-image",
+    "gemini-3.1-flash-lite-image",
+    "gemini-3-pro-image",
+    "gemini-2.5-flash-image",
+}
+local DEFAULT_IMAGE_MODEL = IMAGE_MODELS[1]
+
+-- Saved image model, ignoring legacy imagen-* values
+function KoCharacters:getImageModel()
+    local m = G_reader_settings:readSetting("kocharacters_imagen_model")
+    if not m or m == "" or m:match("^imagen%-") then return DEFAULT_IMAGE_MODEL end
+    return m
 end
 
 function KoCharacters:getCurrentPage()
@@ -1110,7 +1126,7 @@ function KoCharacters:onViewUsage()
     table.insert(lines, string.format("%-16s %-6d %-10d %-10d %d", "TOTAL", tot_calls, tot_prompt, tot_output, tot_images))
 
     UIManager:show(TextViewer:new{
-        title  = "API Usage (Gemini + Imagen)",
+        title  = "API Usage (Gemini text + images)",
         text   = table.concat(lines, "\n"),
         width  = math.floor(Screen:getWidth() * 0.9),
         height = math.floor(Screen:getHeight() * 0.85),
@@ -2495,7 +2511,7 @@ function KoCharacters:portraitPath(book_id, char)
     return dir .. "/" .. filename
 end
 
--- Generate and save a portrait using Imagen
+-- Generate and save a portrait using a Gemini image model
 -- Core portrait generation logic. Returns nil on success, error string on failure.
 function KoCharacters:generatePortraitForChar(book_id, char)
     local DataStorage = require("datastorage")
@@ -2532,13 +2548,16 @@ function KoCharacters:generatePortraitForChar(book_id, char)
     local fq = io.open(req_file, "w")
     if not fq then return "Could not write request file." end
     fq:write(json.encode({
-        instances  = {{ prompt = prompt }},
-        parameters = { sampleCount = 1, aspectRatio = "1:1" },
+        contents         = {{ parts = {{ text = prompt }} }},
+        generationConfig = {
+            responseModalities = { "IMAGE" },
+            imageConfig        = { aspectRatio = "1:1" },
+        },
     }))
     fq:close()
 
-    local imagen_model = G_reader_settings:readSetting("kocharacters_imagen_model") or "imagen-4.0-fast-generate-001"
-    local url = "https://generativelanguage.googleapis.com/v1beta/models/" .. imagen_model .. ":predict?key=" .. api_key
+    local image_model = self:getImageModel()
+    local url = "https://generativelanguage.googleapis.com/v1beta/models/" .. image_model .. ":generateContent?key=" .. api_key
     os.execute(string.format(
         'curl -s --max-time 120 -X POST -H "Content-Type: application/json" -d @"%s" "%s" -o "%s"',
         req_file, url, resp_file
@@ -2546,17 +2565,31 @@ function KoCharacters:generatePortraitForChar(book_id, char)
     os.remove(req_file)
 
     local f = io.open(resp_file, "r")
-    if not f then return "No response from Imagen API." end
+    if not f then return "No response from Gemini image API." end
     local raw = f:read("*a")
     f:close()
     os.remove(resp_file)
 
     local parsed = json.decode(raw)
-    if not parsed then return "Could not parse Imagen response:\n" .. raw:sub(1, 200) end
-    if parsed.error then return "Imagen error:\n" .. (parsed.error.message or json.encode(parsed.error)) end
+    if not parsed then return "Could not parse image response:\n" .. raw:sub(1, 200) end
+    if parsed.error then return "Image generation error:\n" .. (parsed.error.message or json.encode(parsed.error)) end
 
-    local b64 = parsed.predictions and parsed.predictions[1] and parsed.predictions[1].bytesBase64Encoded
-    if not b64 or b64 == "" then return "Imagen returned no image.\n" .. raw:sub(1, 200) end
+    -- Image bytes come back as an inline data part of the first candidate
+    local b64
+    local cand = parsed.candidates and parsed.candidates[1]
+    local parts = cand and cand.content and cand.content.parts or {}
+    for _, part in ipairs(parts) do
+        local inline = part.inlineData or part.inline_data
+        if inline and inline.data and inline.data ~= "" then
+            b64 = inline.data
+            break
+        end
+    end
+    if not b64 or b64 == "" then
+        local reason = (cand and cand.finishReason)
+            or (parsed.promptFeedback and parsed.promptFeedback.blockReason)
+        return "No image returned" .. (reason and (" (" .. reason .. ")") or "") .. ".\n" .. raw:sub(1, 200)
+    end
 
     local tmp_b64 = portraits_dir .. "/.tmp_b64"  -- temp file inside the book's portraits dir
     local fb = io.open(tmp_b64, "w")
@@ -3427,22 +3460,17 @@ function KoCharacters:onOpenSettings()
                 {
                     text     = "Gemini Image Generation key",
                     callback = function() self_ref:onSetApiKey() end,
-                    help     = "A separate API key used to generate character portrait images with Google Imagen. Can be the same key as the extraction key, or a different one. Requires Imagen API access on your Google Cloud project.",
+                    help     = "A separate API key used to generate character portrait images with a Gemini image model. Can be the same key as the extraction key, or a different one. Image generation may require billing enabled on your Google Cloud project.",
                 },
                 {
                     text_func = function()
-                        local m = G_reader_settings:readSetting("kocharacters_imagen_model") or "imagen-4.0-fast-generate-001"
-                        return "Imagen model: " .. m
+                        return "Image model: " .. self_ref:getImageModel()
                     end,
-                    help     = "The Imagen model used to generate character portraits.\n\n• imagen-4.0-fast: quickest, lowest cost\n• imagen-4.0: balanced quality and speed\n• imagen-4.0-ultra: highest quality, slower and more expensive",
+                    help     = "The Gemini image model used to generate character portraits.\n\n• gemini-3.1-flash-image: balanced quality and speed (default)\n• gemini-3.1-flash-lite-image: quickest, lowest cost\n• gemini-3-pro-image: highest quality, slower and more expensive\n• gemini-2.5-flash-image: legacy",
                     callback = function()
                         local model_menu
                         local items = {}
-                        for _, m in ipairs({
-                            "imagen-4.0-fast-generate-001",
-                            "imagen-4.0-generate-001",
-                            "imagen-4.0-ultra-generate-001",
-                        }) do
+                        for _, m in ipairs(IMAGE_MODELS) do
                             local model = m
                             table.insert(items, {
                                 text     = model,
@@ -3455,7 +3483,7 @@ function KoCharacters:onOpenSettings()
                             })
                         end
                         model_menu = Menu:new{
-                            title       = "Select Imagen Model",
+                            title       = "Select Image Model",
                             item_table  = items,
                             width       = Screen:getWidth(),
                             show_parent = self_ref.ui,
@@ -3496,7 +3524,7 @@ function KoCharacters:onOpenSettings()
                     callback = function() self_ref:onEditPrompt(
                         "Portrait Prompt", "kocharacters_portrait_prompt",
                         DEFAULT_PORTRAIT_PROMPT) end,
-                    help     = "The prompt template used when generating a character portrait with Imagen. Controls the visual style, composition, and mood. The character's name and description are appended automatically.",
+                    help     = "The prompt template used when generating a character portrait with a Gemini image model. Controls the visual style, composition, and mood. The character's name and description are appended automatically.",
                 },
                 {
                     text     = "Edit merge detection prompt",
@@ -3546,7 +3574,7 @@ function KoCharacters:onOpenSettings()
             {
                 text     = "AI Settings",
                 callback = function() openAISettings() end,
-                help     = "Opens AI configuration: set your Gemini API key, Imagen API key, and customise the AI prompts used for extraction, cleanup, reanalysis, and portrait generation.",
+                help     = "Opens AI configuration: set your Gemini API key, image generation API key, and customise the AI prompts used for extraction, cleanup, reanalysis, and portrait generation.",
             },
             {
                 text_func = function()
@@ -3789,7 +3817,7 @@ function KoCharacters:onOpenSettings()
                         title = "About KoCharacters",
                         text  = "KoCharacters v" .. (meta.version or "?") .. "\n\n"
                              .. "Automatically extract, track, and enrich character profiles from your books using Google Gemini AI. "
-                             .. "Generate portraits with Google Imagen. Runs on KOReader on Kindle and other supported devices.\n\n"
+                             .. "Generate portraits with Gemini image models. Runs on KOReader on Kindle and other supported devices.\n\n"
                              .. "\xC2\xA9 2026\nNefelodamon\n\n"
                              .. "https://github.com/nefelodamon/KoCharacters",
                         width  = math.floor(Screen:getWidth() * 0.9),
@@ -3841,7 +3869,7 @@ function KoCharacters:onSetApiKey()
         title       = "Gemini Image Generation Key",
         input       = current_key,
         input_hint  = "AIza...",
-        description = "API key used for portrait generation (Imagen).\nGet a key at aistudio.google.com",
+        description = "API key used for portrait generation (Gemini image models).\nGet a key at aistudio.google.com",
         buttons = {{
             { text = "Cancel", callback = function() UIManager:close(dialog) end },
             {
