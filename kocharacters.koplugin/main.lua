@@ -2237,7 +2237,15 @@ function KoCharacters:showCharacterViewer(book_id, char, sort_mode, query, refre
                     self_ref:onGeneratePortrait(book_id, char)
                     self_ref:showCharacterViewer(book_id, char, sort_mode, query, refresh_browser_fn)
                 end },
+                { text = "Find image", callback = function()
+                    close_fn()
+                    self_ref:onSearchPortrait(book_id, char, function()
+                        self_ref:showCharacterViewer(book_id, char, sort_mode, query, refresh_browser_fn)
+                    end)
+                end },
                 { text = "Merge into...", callback = do_merge },
+            },
+            {
                 { text = "Delete",        callback = do_delete },
             },
         }
@@ -2620,6 +2628,268 @@ function KoCharacters:onGeneratePortrait(book_id, char)
     else
         self:showMsg("Portrait saved for " .. (char.name or "character") .. ".", 3)
     end
+end
+
+-- ---------------------------------------------------------------------------
+-- Portrait lookup via Brave image search
+-- ---------------------------------------------------------------------------
+local BRAVE_IMAGE_SEARCH_URL = "https://api.search.brave.com/res/v1/images/search"
+
+local function urlEncode(str)
+    return (str:gsub("[^%w%-%._~]", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end))
+end
+
+-- Quote a string for safe use as a single shell argument
+local function shellQuote(str)
+    return "'" .. str:gsub("'", "'\\''") .. "'"
+end
+
+-- Detect image type from magic bytes; nil if the file is not a supported image
+local function sniffImageType(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local head = f:read(12) or ""
+    f:close()
+    if head:sub(1, 3) == "\255\216\255" then return "jpeg" end
+    if head:sub(1, 8) == "\137PNG\r\n\26\n" then return "png" end
+    if head:sub(1, 4) == "GIF8" then return "gif" end
+    if head:sub(1, 4) == "RIFF" and head:sub(9, 12) == "WEBP" then return "webp" end
+    return nil
+end
+
+function KoCharacters:getBraveApiKey()
+    return G_reader_settings:readSetting("kocharacters_brave_api_key") or ""
+end
+
+-- Search Brave for images. Returns a list of { title, source, thumb, full } or nil, error.
+function KoCharacters:searchImages(query)
+    local DataStorage = require("datastorage")
+    local json        = require("dkjson")
+    local util        = require("util")
+
+    local api_key = self:getBraveApiKey():gsub("[^%w%-_]", "")
+    if api_key == "" then
+        return nil, "No Brave Search API key set.\nAdd one in Settings → AI Settings → Brave Search API key."
+    end
+
+    local tmp_dir = DataStorage:getDataDir() .. "/kocharacters"
+    util.makePath(tmp_dir)
+    local resp_file = tmp_dir .. "/.image_search_resp.json"
+    local url = BRAVE_IMAGE_SEARCH_URL .. "?q=" .. urlEncode(query) .. "&count=20&safesearch=strict"
+    os.execute(string.format(
+        'curl -s --max-time 30 -H "Accept: application/json" -H "X-Subscription-Token: %s" %s -o "%s"',
+        api_key, shellQuote(url), resp_file
+    ))
+
+    local f = io.open(resp_file, "r")
+    if not f then return nil, "No response from Brave Search." end
+    local raw = f:read("*a")
+    f:close()
+    os.remove(resp_file)
+
+    local parsed = json.decode(raw)
+    if not parsed then return nil, "Could not parse Brave Search response:\n" .. raw:sub(1, 200) end
+    if parsed.error then
+        local e = parsed.error
+        return nil, "Brave Search error:\n" .. (type(e) == "table" and (e.detail or e.code or json.encode(e)) or tostring(e))
+    end
+
+    local results = {}
+    for _, r in ipairs(parsed.results or {}) do
+        local thumb = r.thumbnail and r.thumbnail.src
+        local full  = r.properties and r.properties.url
+        if (thumb and thumb ~= "") or (full and full ~= "") then
+            local source = r.source
+            if (not source or source == "") and r.url then source = r.url:match("^%a+://([^/]+)") end
+            table.insert(results, {
+                title  = (r.title and r.title ~= "") and r.title or "Untitled",
+                source = source or "",
+                thumb  = thumb,
+                full   = full,
+            })
+        end
+    end
+    return results
+end
+
+-- Download a search result to dest_path. Returns nil on success, error string on failure.
+function KoCharacters:downloadSearchImage(result, dest_path)
+    local UA = "Mozilla/5.0 (KOReader; KoCharacters)"
+    -- Brave's proxied thumbnail first (reliable, e-ink sized), then the original image
+    for _, src in ipairs({ result.thumb, result.full }) do
+        if src and src ~= "" and src:match("^https?://") then
+            os.remove(dest_path)
+            os.execute(string.format(
+                'curl -sL --max-time 30 -A "%s" %s -o "%s"',
+                UA, shellQuote(src), dest_path
+            ))
+            if sniffImageType(dest_path) then return nil end
+        end
+    end
+    os.remove(dest_path)
+    return "Could not download a usable image from this result."
+end
+
+-- Show a downloaded candidate image with Use / Back / Cancel buttons
+function KoCharacters:showImagePreview(image_path, title, on_use, on_back)
+    local ImageWidget     = require("ui/widget/imagewidget")
+    local ButtonTable     = require("ui/widget/buttontable")
+    local FrameContainer  = require("ui/widget/container/framecontainer")
+    local CenterContainer = require("ui/widget/container/centercontainer")
+    local VerticalGroup   = require("ui/widget/verticalgroup")
+    local TextWidget      = require("ui/widget/textwidget")
+    local Font            = require("ui/font")
+    local Size            = require("ui/size")
+    local Blitbuffer      = require("ffi/blitbuffer")
+    local Geom            = require("ui/geometry")
+
+    local w      = Screen:getWidth()  - 8
+    local h      = Screen:getHeight() - 8
+    local border = 2
+    local inner_w = w - 2*border
+
+    local dialog
+    local function close() if dialog then UIManager:close(dialog) end end
+
+    local btable = ButtonTable:new{
+        width   = inner_w,
+        buttons = {{
+            { text = "Use as portrait", callback = function() close(); on_use() end },
+            { text = "Back to results", callback = function() close(); on_back() end },
+            { text = "Cancel",          callback = function() close(); os.remove(image_path) end },
+        }},
+    }
+    local label = TextWidget:new{
+        text      = title,
+        face      = Font:getFace("cfont", 18),
+        max_width = inner_w - 2*Size.padding.default,
+    }
+    local img_h = h - 2*border - btable:getSize().h - label:getSize().h - 2*Size.padding.default
+    local image = ImageWidget:new{
+        file         = image_path,
+        width        = inner_w,
+        height       = img_h,
+        scale_factor = 0,
+        file_do_cache = false,
+    }
+
+    dialog = CenterContainer:new{
+        dimen = Geom:new{ w = Screen:getWidth(), h = Screen:getHeight() },
+        FrameContainer:new{
+            radius     = Size.radius.window,
+            padding    = 0,
+            bordersize = border,
+            background = Blitbuffer.COLOR_WHITE,
+            VerticalGroup:new{
+                align = "center",
+                CenterContainer:new{
+                    dimen = Geom:new{ w = inner_w, h = label:getSize().h + 2*Size.padding.default },
+                    label,
+                },
+                CenterContainer:new{
+                    dimen = Geom:new{ w = inner_w, h = img_h },
+                    image,
+                },
+                btable,
+            },
+        },
+    }
+    UIManager:show(dialog)
+end
+
+-- Look up a portrait for a character with an image search and let the user pick one.
+-- on_done is called after a portrait has been saved.
+function KoCharacters:onSearchPortrait(book_id, char, on_done)
+    if self:getBraveApiKey() == "" then
+        self:showMsg("No Brave Search API key set.\nAdd one in Settings → AI Settings → Brave Search API key.", 6)
+        return
+    end
+    local self_ref = self
+    local DataStorage = require("datastorage")
+    local util        = require("util")
+    local portraits_dir = DataStorage:getDataDir() .. "/kocharacters/" .. book_id .. "/portraits"
+    util.makePath(portraits_dir)
+    local candidate_path = portraits_dir .. "/.search_candidate"
+
+    local function show_results(query, results)
+        local menu
+        local items = {}
+        for i, r in ipairs(results) do
+            local result = r
+            table.insert(items, {
+                text      = i .. ". " .. result.title,
+                mandatory = result.source,
+                callback  = function()
+                    local msg = InfoMessage:new{ text = "Downloading image…" }
+                    UIManager:show(msg)
+                    UIManager:forceRePaint()
+                    local err = self_ref:downloadSearchImage(result, candidate_path)
+                    UIManager:close(msg)
+                    if err then self_ref:showMsg(err, 4); return end
+                    UIManager:close(menu)
+                    self_ref:showImagePreview(candidate_path, result.title,
+                        function()
+                            local out_path = self_ref:portraitPath(book_id, char)
+                            os.remove(out_path)
+                            local ok = os.rename(candidate_path, out_path)
+                            if not ok then
+                                self_ref:showMsg("Could not save portrait.", 4)
+                                return
+                            end
+                            char.portrait_file = out_path:match("([^/]+)$")
+                            self_ref.db:updateCharacter(book_id, char.name, char)
+                            self_ref:showMsg("Portrait saved for " .. (char.name or "character") .. ".", 3)
+                            if on_done then on_done() end
+                        end,
+                        function()
+                            os.remove(candidate_path)
+                            show_results(query, results)
+                        end)
+                end,
+            })
+        end
+        menu = Menu:new{
+            title       = "Images: " .. query,
+            item_table  = items,
+            width       = Screen:getWidth(),
+            show_parent = self_ref.ui,
+        }
+        UIManager:show(menu)
+    end
+
+    local function run_search(query)
+        local msg = InfoMessage:new{ text = "Searching images for “" .. query .. "”…" }
+        UIManager:show(msg)
+        UIManager:forceRePaint()
+        local results, err = self_ref:searchImages(query)
+        UIManager:close(msg)
+        if not results then self_ref:showMsg(err, 6); return end
+        if #results == 0 then self_ref:showMsg("No images found for “" .. query .. "”.", 4); return end
+        show_results(query, results)
+    end
+
+    local default_query = (char.name or "") .. " " .. self:getBookTitle():gsub("%.%w+$", "")
+    local dialog
+    dialog = InputDialog:new{
+        title       = "Find portrait image",
+        input       = default_query,
+        description = "Search the web for an image of this character.\nEdit the search terms if needed.",
+        buttons = {{
+            { text = "Cancel", callback = function() UIManager:close(dialog) end },
+            {
+                text = "Search", is_enter_default = true,
+                callback = function()
+                    local query = (dialog:getInputText() or ""):match("^%s*(.-)%s*$") or ""
+                    UIManager:close(dialog)
+                    if query ~= "" then run_search(query) end
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
 end
 
 -- Check whether a portrait file exists for a character
@@ -3463,6 +3733,11 @@ function KoCharacters:onOpenSettings()
                     help     = "A separate API key used to generate character portrait images with a Gemini image model. Can be the same key as the extraction key, or a different one. Image generation may require billing enabled on your Google Cloud project.",
                 },
                 {
+                    text     = "Brave Search API key",
+                    callback = function() self_ref:onSetBraveApiKey() end,
+                    help     = "API key used by \"Find image\" to look up character portraits with Brave image search instead of generating them. Get a key at brave.com/search/api.",
+                },
+                {
                     text_func = function()
                         return "Image model: " .. self_ref:getImageModel()
                     end,
@@ -3879,6 +4154,31 @@ function KoCharacters:onSetApiKey()
                     G_reader_settings:saveSetting("kocharacters_imagen_api_key", key)
                     UIManager:close(dialog)
                     self:showMsg("Image generation key saved.", 2)
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+function KoCharacters:onSetBraveApiKey()
+    local current_key = self:getBraveApiKey()
+    local dialog
+    dialog = InputDialog:new{
+        title       = "Brave Search API Key",
+        input       = current_key,
+        input_hint  = "BSA...",
+        description = "API key used to find character portraits via image search.\nGet a key at brave.com/search/api",
+        buttons = {{
+            { text = "Cancel", callback = function() UIManager:close(dialog) end },
+            {
+                text = "Save", is_enter_default = true,
+                callback = function()
+                    local key = (dialog:getInputText() or ""):match("^%s*(.-)%s*$") or ""
+                    G_reader_settings:saveSetting("kocharacters_brave_api_key", key)
+                    UIManager:close(dialog)
+                    self:showMsg("Brave Search key saved.", 2)
                 end,
             },
         }},
@@ -4381,6 +4681,13 @@ function KoCharacters:onWordCharacterLookup(word)
                         callback = function()
                             UIManager:close(viewer)
                             self_ref:onGeneratePortrait(book_id, char)
+                        end,
+                    },
+                    {
+                        text     = "Find Image",
+                        callback = function()
+                            UIManager:close(viewer)
+                            self_ref:onSearchPortrait(book_id, char)
                         end,
                     },
                     {
